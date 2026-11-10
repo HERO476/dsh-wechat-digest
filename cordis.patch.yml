@@ -1,0 +1,6 @@
+# wechat-digest bundle patch：把宿主行挂到包名上，经 profile 的 node_modules 解析。
+# 客户端半由包的 `dsh.client` 声明自动拾取。
+
+- insert:
+    - id: wechat-digest
+      name: dsh-wechat-digest

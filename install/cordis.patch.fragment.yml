@@ -1,0 +1,19 @@
+# 把这段追加到
+#   C:\Users\<你的用户名>\.dsh\profiles\desktop\cordis.patch.yml
+# 末尾即可（结构照抄同文件里既有的 mcp-snowluma 条目，未使用未验证的 env 键）。
+#
+# 默认行为：file 模式，读 <项目目录>\exports
+# 要改数据源/模型，直接编辑 src/run-mcp.mjs 顶部的默认值。
+
+# === wechat-digest MCP BEGIN ===
+- insert:
+    - id: mcp-wechat-digest
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: wechat-digest
+        transport: stdio
+        command: 'D:\Program Files\nodejs\node.exe'
+        args:
+          - '<项目目录>\src\run-mcp.mjs'
+        toolCallTimeoutMs: 120000
+# === wechat-digest MCP END ===

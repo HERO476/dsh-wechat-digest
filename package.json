@@ -1,0 +1,74 @@
+{
+  "name": "dsh-wechat-digest",
+  "version": "0.1.2",
+  "description": "只读的微信聊天摘要插件：按需选择群聊/私聊，用模型抽取重点活动与待办，含 DSH 设置项与 MCP 工具；零发送能力。与 dsh-wechat 系列桥接插件方向相反——本插件只读，不发送消息。",
+  "type": "module",
+  "main": "lib/index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HERO476/dsh-wechat-digest.git"
+  },
+  "homepage": "https://github.com/HERO476/dsh-wechat-digest#readme",
+  "bugs": {
+    "url": "https://github.com/HERO476/dsh-wechat-digest/issues"
+  },
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/",
+    "src/",
+    "scripts/",
+    "test/",
+    "docs/",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "wechat",
+    "weixin",
+    "digest",
+    "wechat-digest",
+    "chat-summary",
+    "summary",
+    "mcp",
+    "readonly"
+  ],
+  "author": "HERO476",
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    },
+    "engines": {
+      "dsh": ">=0.1.3-alpha.2 <0.1.4 || >=0.1.4-0 <0.1.5-0 || >=0.1.5-alpha.1 <0.1.6-0 || >=0.1.6-alpha.0 <0.1.7-0 || >=0.1.7-alpha.0 <0.2.0-0 || >=0.2.1-alpha.0 <0.3.0-0 || >=0.2.2-alpha.0 <0.3.0-0 || >=0.2.0-0 <0.3.0-0"
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node scripts/run-tests.mjs",
+    "check": "node scripts/check-core-purity.mjs",
+    "verify": "node scripts/check-core-purity.mjs && node scripts/run-tests.mjs",
+    "settings": "node scripts/settings-server.mjs"
+  }
+}
