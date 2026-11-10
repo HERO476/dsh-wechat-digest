@@ -32,6 +32,7 @@ export function createService(options = {}) {
     policy: rawPolicy,
     summarize = summarizeMessages,
     store: injectedStore,
+    lock: injectedLock,
     getPolicy: externalPolicyProvider,
   } = options;
 
@@ -64,7 +65,8 @@ export function createService(options = {}) {
 
   const gate = createGate({ secret });
   const store = injectedStore ?? createGuardStore();
-  const lock = createMemoryLock();
+  // 默认进程内锁；跨进程场景（设置页 + MCP）由调用方注入文件锁。
+  const lock = injectedLock ?? createMemoryLock();
 
   // 文件模式是"全量快照"，每次都读完整一份，因此不用增量水位线；
   // 否则第二次跑会把整份导出当成"已经摘要过"而全部跳过。
@@ -102,12 +104,36 @@ export function createService(options = {}) {
     return { allowed, denied };
   }
 
-  function getSummary(roomHandle) {
-    if (typeof roomHandle !== 'string' || !/^[0-9a-f]{16}$/.test(roomHandle)) {
+  /**
+   * 读摘要：除了格式校验，还要**按当前策略复核**。
+   * 否则「取消勾选某个群」之后，历史摘要仍然能被拿到句柄的人无限期读出来。
+   */
+  async function getSummary(roomHandleValue) {
+    if (typeof roomHandleValue !== 'string' || !/^[0-9a-f]{16}$/.test(roomHandleValue)) {
       return { status: 'REJECTED', reason: 'INVALID_HANDLE' };
     }
-    const entries = store.all().filter((entry) => entry.roomHandle === roomHandle);
+
+    const entries = store.all().filter((entry) => entry.roomHandle === roomHandleValue);
     if (entries.length === 0) return { status: 'NOT_FOUND' };
+
+    let stillVisible = false;
+    try {
+      const policy = resolvePolicy();
+      const rooms = await adapter.listRooms();
+      stillVisible = rooms.some((room) => {
+        const decision = gate({
+          policy,
+          rawId: room.rawId,
+          authoritativeKind: room.authoritativeKind,
+        });
+        return decision.verdict === 'ALLOW' && decision.roomHandle === roomHandleValue;
+      });
+    } catch {
+      // 读不到策略或导出目录 → 视为不可见（fail-closed）
+      stillVisible = false;
+    }
+
+    if (!stillVisible) return { status: 'DENIED', reason: 'NOT_VISIBLE_NOW' };
     return { status: 'OK', entries };
   }
 

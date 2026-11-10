@@ -1,9 +1,12 @@
 # 把这段追加到
 #   C:\Users\<你的用户名>\.dsh\profiles\desktop\cordis.patch.yml
-# 末尾即可（结构照抄同文件里既有的 mcp-snowluma 条目，未使用未验证的 env 键）。
+# 末尾即可（结构照抄同文件里既有的 mcp-snowluma 条目；env 键在 rea-mcp 条目里已被验证支持，
+#  但本插件不需要 env：句柄密钥、数据目录、导出目录都由包装脚本与数据目录自行推导）。
 #
 # 默认行为：file 模式，读 <项目目录>\exports
-# 要改数据源/模型，直接编辑 src/run-mcp.mjs 顶部的默认值。
+# 句柄密钥：不用配。首次启动自动生成 <dataDir>\secret（32 字节随机值，0600），
+#           宿主半与 MCP 子进程共用同一份，所以句柄稳定。
+# 要改数据源/模型：编辑 src/run-mcp.mjs 顶部的默认值，或在 profile 里加 env 键。
 
 # === wechat-digest MCP BEGIN ===
 - insert:
@@ -15,5 +18,6 @@
         command: 'D:\Program Files\nodejs\node.exe'
         args:
           - '<项目目录>\src\run-mcp.mjs'
-        toolCallTimeoutMs: 120000
+        # 串行逐群调用模型，5 个以上会话可能超过 120s；需要时调大或改成异步 job。
+        toolCallTimeoutMs: 180000
 # === wechat-digest MCP END ===

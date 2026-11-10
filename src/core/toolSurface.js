@@ -34,17 +34,25 @@ export const FORBIDDEN_PARAM_NAMES = new Set([
 export const TOOLS = Object.freeze([
   Object.freeze({
     name: 'list_rooms',
-    description: '列出当前策略下可读的群聊（默认全部群聊）。只读。',
+    description: '只读取本地导出目录，列出当前策略下可读的群聊（不发送任何消息、不写盘）。',
     inputSchema: Object.freeze({ type: 'object', properties: {}, additionalProperties: false }),
+    annotations: Object.freeze({ readOnlyHint: true, destructiveHint: false, openWorldHint: false }),
   }),
   Object.freeze({
     name: 'run_summary',
-    description: '立即执行一次增量总结。只读；不接受任何范围参数，范围由策略开关决定。',
+    description:
+      '执行一次总结：读取被放行的会话消息，调用所配置的模型服务（会出网、会产生调用费用），并把摘要写入本地文件。不接受范围参数，范围由策略开关决定。',
     inputSchema: Object.freeze({ type: 'object', properties: {}, additionalProperties: false }),
+    annotations: Object.freeze({
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    }),
   }),
   Object.freeze({
     name: 'get_summary',
-    description: '按不透明句柄读取已生成的摘要与溯源定位。',
+    description: '只读本地摘要文件：按不透明句柄读取已生成的摘要与溯源定位，并按当前策略复核可见性。',
     inputSchema: Object.freeze({
       type: 'object',
       properties: Object.freeze({
@@ -53,6 +61,7 @@ export const TOOLS = Object.freeze([
       required: Object.freeze(['roomHandle']),
       additionalProperties: false,
     }),
+    annotations: Object.freeze({ readOnlyHint: true, destructiveHint: false, openWorldHint: false }),
   }),
 ]);
 
@@ -69,6 +78,19 @@ export function validateToolSurface(tools = TOOLS) {
     const schema = tool.inputSchema ?? {};
     if (schema.type !== 'object') violations.push(`SCHEMA_NOT_OBJECT:${tool.name}`);
     if (schema.additionalProperties !== false) violations.push(`OPEN_SCHEMA:${tool.name}`);
+
+    // 只读语义必须显式声明（MCP annotations），且不能与文案互相矛盾。
+    const annotations = tool.annotations ?? {};
+    if (typeof annotations.readOnlyHint !== 'boolean') {
+      violations.push(`ANNOTATIONS_MISSING_READONLY:${tool.name}`);
+    }
+    const claimsReadOnly = typeof tool.description === 'string' && tool.description.includes('只读');
+    if (claimsReadOnly && annotations.readOnlyHint !== true) {
+      violations.push(`READONLY_CLAIM_CONFLICT:${tool.name}`);
+    }
+    if (!claimsReadOnly && annotations.readOnlyHint === true) {
+      violations.push(`READONLY_UNDECLARED_IN_TEXT:${tool.name}`);
+    }
 
     for (const prop of Object.keys(schema.properties ?? {})) {
       const lower = prop.toLowerCase();

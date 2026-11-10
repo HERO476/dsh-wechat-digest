@@ -46,13 +46,25 @@
 
 ### 起不来的话怎么回滚
 
+只撤 bundle 还不够 —— MCP 行与数据目录也要处理，否则会留下「工具还在、面板没了」的半装状态。
+
 ```powershell
+# 1) 还原 profile package.json（撤掉 bundles 里的条目）
 Copy-Item C:\Users\<你的用户名>\.dsh\profiles\desktop\package.json.bak-wechat-digest-* `
           C:\Users\<你的用户名>\.dsh\profiles\desktop\package.json -Force
+
+# 2) 删掉 junction
 Remove-Item C:\Users\<你的用户名>\.dsh\profiles\desktop\node_modules\dsh-wechat-digest -Force
+
+# 3) 撤掉 MCP 行：编辑 profile 的 cordis.patch.yml，删除 id 为 mcp-wechat-digest 的那一段
+#    （在 ~/.dsh/profiles/desktop/cordis.patch.yml 里搜 "mcp-wechat-digest"）
+
+# 4) 数据目录（可选：删了就没有历史摘要与配置了）
+Remove-Item C:\Users\<你的用户名>\.dsh\wechat-digest -Recurse -Force
 ```
 
-回滚后独立设置页（`npm run settings`）仍然可用，功能不丢。
+回滚后独立设置页（`npm run settings`）仍然可用，功能不丢；
+再打开 DSH 时设置 →「微信摘要」分区应消失。
 
 ---
 
@@ -76,8 +88,10 @@ npm run settings     # → http://127.0.0.1:7199
 | `WECHAT_DIGEST_SOURCE` | `fixture` / `file`（默认）/ `wechat` |
 | `WECHAT_DIGEST_EXPORT_DIR` | 导出根目录，默认由包位置推导 |
 | `WECHAT_DIGEST_DATA_DIR` | 配置与摘要落盘，默认 `~/.dsh/wechat-digest` |
-| `WECHAT_DIGEST_SECRET` | 句柄 HMAC 密钥，≥16 字符 |
+| `WECHAT_DIGEST_SECRET` | 句柄 HMAC 密钥，≥16 字符；**不设则自动生成 `<dataDir>/secret`**（0600，两半共用） |
+| `WECHAT_DIGEST_ALLOWED_HOSTS` | 额外允许的 Host（逗号分隔）。默认只允许回环，用隧道必须显式加白 |
 | `WECHAT_DIGEST_SUMMARIZER` | `heuristic` / `llm` |
+| `WECHAT_DIGEST_SCHEDULER` | `off` 关掉宿主半定时器（排障用） |
 
 模型密钥优先环境变量 `WECHAT_DIGEST_LLM_API_KEY`，否则运行时读
 `~/.dsh/.credentials.yaml` 的 `DEEPSEEK_API_KEY`。密钥不进仓库、不进日志。
@@ -86,8 +100,15 @@ npm run settings     # → http://127.0.0.1:7199
 
 ## 五、安全提示
 
-- 设置接口能改「是否允许读私聊」，而本机开着 `remote-web-ui.autoTunnel`。
-  宿主半做了**同源校验**（带 `Origin` 且与 `Host` 不一致 → 403），防跨站伪造；
-  但**它挡不住拿到隧道地址的人**——那属于同源访问。
-- 独立设置页只监听 `127.0.0.1`，不做鉴权（本机自用）。
+- 设置接口能改「是否允许读私聊」，而本机可能开着 `remote-web-ui.autoTunnel`。
+  现在的访问控制是两层：
+  1. **Host 白名单**：只接受 `127.0.0.1` / `localhost` / `[::1]`，
+     （也挡 DNS rebinding：攻击页的 `Host` 是它自己的域名）；
+  2. **写操作必须同源 `Origin`**：`POST` 没有 `Origin` 或 `Origin.host !== Host` → 403。
+     浏览器一定带 `Origin`，`curl` 不带 → 程序化改配置被关掉。
+- **要走公网隧道**：把隧道域名写进 `WECHAT_DIGEST_ALLOWED_HOSTS`（逗号分隔）才会放行；
+  不放行时隧道访问会得到 403。**默认不放行**——这是故意的。
+- 独立设置页（`127.0.0.1:7199`）用同一套 Host/Origin 校验。
+- 句柄密钥不再有仓库默认值：`<dataDir>/secret` 首次运行生成 32 字节随机值（0600）。
+  进程内两侧共用同一份，所以句柄稳定；删掉这个文件会让所有历史句柄失效（摘要读不出来）。
 - 插件**永久没有发送能力**：工具面里不存在发送类工具，代码里也没有那条路径。

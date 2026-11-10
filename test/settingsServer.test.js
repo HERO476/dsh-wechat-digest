@@ -1,19 +1,19 @@
 /**
  * 独立设置页的服务端契约测试（in-process，不起外部进程）。
  * 与 DSH 面板共用 settings-api，这里验证的是「页面真的能读到并写回配置」。
+ *
+ * 访问控制与面板一致：Host 必须是回环；写操作必须带同源 Origin。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import { createSettingsServer } from '../scripts/settings-server.mjs';
 
-const ROOT = fileURLToPath(new URL('..', import.meta.url));
-
 async function withServer(fn) {
-  const dir = await mkdtemp(join(ROOT, '.tmp-page-'));
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-wechat-digest-page-'));
   const exportDir = join(dir, 'exports');
   const dataDir = join(dir, 'data');
   await mkdir(join(exportDir, 'g1'), { recursive: true });
@@ -26,8 +26,16 @@ async function withServer(fn) {
   const { port } = server.address();
   const base = `http://127.0.0.1:${port}`;
 
+  /** 写请求：浏览器会带 Origin，这里显式补上（否则会被同源校验挡掉）。 */
+  const post = (path, body) =>
+    fetch(`${base}${path}`, {
+      method: 'POST',
+      headers: { origin: base, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+      ...(body === undefined ? {} : { body: typeof body === 'string' ? body : JSON.stringify(body) }),
+    });
+
   try {
-    return await fn({ base, dataDir, exportDir });
+    return await fn({ base, dataDir, exportDir, post });
   } finally {
     // 先断掉 keep-alive 连接再删目录：否则残留 socket 仍可能在读文件，
     // 与 rm 竞争，表现为偶发的 ENOENT / 断言失败（曾观察到一次）。
@@ -56,7 +64,7 @@ test('页面包含总开关、名字框、模型选择与立即总结按钮', as
   });
 });
 
-test('GET /api/state 返回配置、群列表与星期', async () => {
+test('GET /api/state 返回配置、群列表与星期（不含原始 id 与绝对路径）', async () => {
   await withServer(async ({ base }) => {
     const state = await (await fetch(`${base}/api/state`)).json();
     assert.equal(state.configError, null);
@@ -64,35 +72,59 @@ test('GET /api/state 返回配置、群列表与星期', async () => {
     assert.equal(state.config.private.enabled, false);
     assert.equal(state.config.schedule.time, '09:00');
     assert.deepEqual(state.rooms.map((room) => room.name), ['群一']);
-    assert.equal(state.rooms[0].key, 'g1@chatroom');
+
+    // 群只给不透明句柄
+    assert.match(state.rooms[0].roomHandle, /^[0-9a-f]{16}$/);
+    assert.equal(state.rooms[0].key, undefined);
+    assert.ok(!JSON.stringify(state).includes('g1@chatroom'), '响应里不应出现原始会话 id');
+
+    // 不再外泄宿主绝对路径
+    assert.equal(state.configPath, undefined);
+    assert.equal(state.exportDir, undefined);
+    assert.equal(typeof state.dataDirName, 'string');
     assert.equal(state.weekdays.length, 7);
   });
 });
 
-test('POST /api/config 写回并立即可读', async () => {
-  await withServer(async ({ base }) => {
-    const payload = {
+test('POST /api/config 写回并立即可读（用句柄提交）', async () => {
+  await withServer(async ({ base, post }) => {
+    const before = await (await fetch(`${base}/api/state`)).json();
+    const handle = before.rooms[0].roomHandle;
+
+    const saved = await (await post('/api/config', {
       version: 1,
-      groups: { 'g1@chatroom': { enabled: false } },
+      groupsEnabled: true,
+      groups: { [handle]: { enabled: false } },
       private: { enabled: true },
       summarizer: 'heuristic',
       schedule: { enabled: true, kind: 'weekly', weekdays: ['MO', 'WE'], time: '08:30', timeZone: 'Asia/Shanghai' },
-    };
-    const saved = await (await fetch(`${base}/api/config`, { method: 'POST', body: JSON.stringify(payload) })).json();
+    })).json();
     assert.equal(saved.ok, true);
+    assert.deepEqual(saved.unresolvedHandles, []);
 
     const state = await (await fetch(`${base}/api/state`)).json();
     assert.equal(state.config.summarizer, 'heuristic');
     assert.equal(state.config.private.enabled, true);
     assert.equal(state.config.schedule.time, '08:30');
     assert.deepEqual(state.config.schedule.weekdays, ['MO', 'WE']);
-    assert.equal(state.config.groups['g1@chatroom'].enabled, false);
+    assert.equal(state.selected.groups[handle].enabled, false, '勾选状态按句柄回给前端');
+  });
+});
+
+test('写请求缺 Origin → 403（本机设置页也挡 DNS rebinding）', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/api/config`, {
+      method: 'POST',
+      body: JSON.stringify({ version: 1, summarizer: 'heuristic' }),
+    });
+    assert.equal(res.status, 403);
+    assert.equal((await res.json()).reason, 'CROSS_ORIGIN_DENIED');
   });
 });
 
 test('非法配置被拒，且不破坏已有配置', async () => {
-  await withServer(async ({ base }) => {
-    const res = await fetch(`${base}/api/config`, { method: 'POST', body: JSON.stringify({ version: 1, summarizer: 'x' }) });
+  await withServer(async ({ base, post }) => {
+    const res = await post('/api/config', { version: 1, summarizer: 'x' });
     assert.equal(res.status, 400);
     const body = await res.json();
     assert.equal(body.ok, false);
@@ -103,27 +135,24 @@ test('非法配置被拒，且不破坏已有配置', async () => {
 });
 
 test('坏 JSON 被拒', async () => {
-  await withServer(async ({ base }) => {
-    const res = await fetch(`${base}/api/config`, { method: 'POST', body: '{不是 JSON' });
+  await withServer(async ({ post }) => {
+    const res = await post('/api/config', '{不是 JSON');
     assert.equal(res.status, 400);
     assert.equal((await res.json()).reason, 'BAD_JSON');
   });
 });
 
 test('POST /api/reset 恢复默认', async () => {
-  await withServer(async ({ base }) => {
-    await fetch(`${base}/api/config`, {
-      method: 'POST',
-      body: JSON.stringify({
-        version: 1,
-        groups: {},
-        private: { enabled: true },
-        summarizer: 'heuristic',
-        schedule: { enabled: false, kind: 'weekly', weekdays: ['MO'], time: '07:00', timeZone: 'Asia/Shanghai' },
-      }),
+  await withServer(async ({ base, post }) => {
+    await post('/api/config', {
+      version: 1,
+      groups: {},
+      private: { enabled: true },
+      summarizer: 'heuristic',
+      schedule: { enabled: false, kind: 'weekly', weekdays: ['MO'], time: '07:00', timeZone: 'Asia/Shanghai' },
     });
 
-    const reset = await (await fetch(`${base}/api/reset`, { method: 'POST' })).json();
+    const reset = await (await post('/api/reset')).json();
     assert.equal(reset.ok, true);
 
     const state = await (await fetch(`${base}/api/state`)).json();
@@ -144,21 +173,18 @@ test('未知路径 404；导出目录不可读时给出 roomsError', async () =>
 });
 
 test('POST /api/run 立即总结（本地关键词，不联网）', async () => {
-  await withServer(async ({ base }) => {
-    await fetch(`${base}/api/config`, {
-      method: 'POST',
-      body: JSON.stringify({
-        version: 1,
-        groupsEnabled: true,
-        groups: {},
-        private: { enabled: false, chats: {} },
-        summarizer: 'heuristic',
-        llm: { provider: 'deepseek-official', model: 'deepseek-flash' },
-        schedule: { enabled: true, kind: 'weekly', weekdays: ['MO'], time: '09:00', timeZone: 'Asia/Shanghai' },
-      }),
+  await withServer(async ({ post }) => {
+    await post('/api/config', {
+      version: 1,
+      groupsEnabled: true,
+      groups: {},
+      private: { enabled: false, chats: {} },
+      summarizer: 'heuristic',
+      llm: { provider: 'deepseek-official', model: 'deepseek-flash' },
+      schedule: { enabled: true, kind: 'weekly', weekdays: ['MO'], time: '09:00', timeZone: 'Asia/Shanghai' },
     });
 
-    const res = await fetch(`${base}/api/run`, { method: 'POST' });
+    const res = await post('/api/run');
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.ok, true);
@@ -168,62 +194,59 @@ test('POST /api/run 立即总结（本地关键词，不联网）', async () => 
 });
 
 test('POST /api/run 群聊总开关关掉时不产出', async () => {
-  await withServer(async ({ base }) => {
-    await fetch(`${base}/api/config`, {
-      method: 'POST',
-      body: JSON.stringify({
-        version: 1,
-        groupsEnabled: false,
-        groups: {},
-        private: { enabled: false, chats: {} },
-        summarizer: 'heuristic',
-        llm: { provider: 'deepseek-official', model: 'deepseek-flash' },
-        schedule: { enabled: true, kind: 'weekly', weekdays: ['MO'], time: '09:00', timeZone: 'Asia/Shanghai' },
-      }),
+  await withServer(async ({ post }) => {
+    await post('/api/config', {
+      version: 1,
+      groupsEnabled: false,
+      groups: {},
+      private: { enabled: false, chats: {} },
+      summarizer: 'heuristic',
+      llm: { provider: 'deepseek-official', model: 'deepseek-flash' },
+      schedule: { enabled: true, kind: 'weekly', weekdays: ['MO'], time: '09:00', timeZone: 'Asia/Shanghai' },
     });
 
-    const body = await (await fetch(`${base}/api/run`, { method: 'POST' })).json();
+    const body = await (await post('/api/run')).json();
     assert.equal(body.summarized, 0);
   });
 });
 
 test('自定义名字：列表与摘要结果都用自定义名', async () => {
-  await withServer(async ({ base }) => {
-    await fetch(`${base}/api/config`, {
-      method: 'POST',
-      body: JSON.stringify({
-        version: 1,
-        groupsEnabled: true,
-        groups: { 'g1@chatroom': { enabled: true, name: '产品评审群' } },
-        private: { enabled: false, chats: {} },
-        summarizer: 'heuristic',
-        llm: { provider: 'deepseek-official', model: 'deepseek-flash' },
-        schedule: { enabled: true, kind: 'weekly', weekdays: ['MO'], time: '09:00', timeZone: 'Asia/Shanghai' },
-      }),
+  await withServer(async ({ base, post }) => {
+    const before = await (await fetch(`${base}/api/state`)).json();
+    const handle = before.rooms[0].roomHandle;
+
+    await post('/api/config', {
+      version: 1,
+      groupsEnabled: true,
+      groups: { [handle]: { enabled: true, name: '产品评审群' } },
+      private: { enabled: false, chats: {} },
+      summarizer: 'heuristic',
+      llm: { provider: 'deepseek-official', model: 'deepseek-flash' },
+      schedule: { enabled: true, kind: 'weekly', weekdays: ['MO'], time: '09:00', timeZone: 'Asia/Shanghai' },
     });
 
     const state = await (await fetch(`${base}/api/state`)).json();
     assert.equal(state.groups[0].name, '产品评审群', '列表应显示自定义名');
 
-    const run = await (await fetch(`${base}/api/run`, { method: 'POST' })).json();
+    const run = await (await post('/api/run')).json();
     assert.equal(run.items.length, 1);
     assert.equal(run.items[0].name, '产品评审群', '摘要结果也应带自定义名');
   });
 });
 
 test('清空自定义名字后回落到导出目录里的名字', async () => {
-  await withServer(async ({ base }) => {
-    await fetch(`${base}/api/config`, {
-      method: 'POST',
-      body: JSON.stringify({
-        version: 1,
-        groupsEnabled: true,
-        groups: { 'g1@chatroom': { enabled: true, name: '' } },
-        private: { enabled: false, chats: {} },
-        summarizer: 'heuristic',
-        llm: { provider: 'deepseek-official', model: 'deepseek-flash' },
-        schedule: { enabled: true, kind: 'weekly', weekdays: ['MO'], time: '09:00', timeZone: 'Asia/Shanghai' },
-      }),
+  await withServer(async ({ base, post }) => {
+    const before = await (await fetch(`${base}/api/state`)).json();
+    const handle = before.rooms[0].roomHandle;
+
+    await post('/api/config', {
+      version: 1,
+      groupsEnabled: true,
+      groups: { [handle]: { enabled: true, name: '' } },
+      private: { enabled: false, chats: {} },
+      summarizer: 'heuristic',
+      llm: { provider: 'deepseek-official', model: 'deepseek-flash' },
+      schedule: { enabled: true, kind: 'weekly', weekdays: ['MO'], time: '09:00', timeZone: 'Asia/Shanghai' },
     });
 
     const state = await (await fetch(`${base}/api/state`)).json();

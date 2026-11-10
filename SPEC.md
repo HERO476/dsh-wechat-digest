@@ -50,7 +50,8 @@
 
 ## 3. 接口形状（铁律）
 
-1. `run_summary` 的入参**只有一个键**：`trigger`（`scheduled` | `manual`）。
+1. `run_summary` 的入参**零个键**（schema `properties: {}`）。范围只能由策略开关改变；
+   工具自己固定以 `manual` 触发，模型也无法通过参数改变触发方式。
    多一个键即 `REJECTED / SCOPE_PARAM_FORBIDDEN`。
 2. 工具面**不存在**任何发送类工具（send / reply / post / forward / comment / broadcast）。
 3. 工具面**不存在**任何接收原始 chat id 的入参；读取用不透明句柄 `roomHandle`（HMAC 前 16 位）。
@@ -107,7 +108,7 @@ trigger(scheduled|manual)  ← 唯一入参
 
 ### 触发层
 - **AC-TR1 单漏斗**：定时与手动在闸门之前是同一段代码。
-- **AC-TR2 无范围参数**：`run_summary` schema 只有 `trigger`；传范围参数即拒。
+- **AC-TR2 无范围参数**：`run_summary` schema 零属性（`properties: {}`，`additionalProperties: false`）；传任何参数即拒。
 - **AC-TR3 触发不越权**：私聊关着时手动满功率跑，私聊哨兵仍为 0。
 - **AC-TR4 撞车**：连发两次 → 第二次 `ALREADY_RUNNING`，只产出一份。
 - **AC-TR5 水位线**：第二次输入窗口从上次水位线之后开始。
@@ -121,7 +122,7 @@ trigger(scheduled|manual)  ← 唯一入参
 - 取数组件：微信 4.x 库为 SQLCipher 加密，密钥只在 `Weixin.exe` 进程内存中；
   DSH 工作区带 `Low Mandatory Level` 标签，沙箱内无法取密钥。
   故取数组件必须跑在**沙箱外、Medium/High IL、需管理员权限**，属二期项。
-- 摘要模型接线、定时任务注册、UI 面板。
+- 摘要模型接线、UI 面板。（定时任务已在本期实现：`lib/scheduler.mjs`）
 
 **未评估（如实标注）**：腾讯 ToS 与账号风险。评审团三位均未评估此项，本规格不替它下结论。
 
@@ -160,13 +161,16 @@ trigger(scheduled|manual)  ← 唯一入参
 
 - MCP 工具 `run_summary` 固定以 `trigger: 'manual'` 运行——工具刻意**没有** trigger 入参，
   否则"手动触发"就多了一个可被注入影响的维度。
-- 定时路径由宿主自动化**直接调用脚本**（`scripts/file-demo.mjs`），不经过 MCP 工具，
-  因此定时运行带自己的标记、且与手动共享同一套闸门与存储保护。
+- 摘要在**宿主进程内**由 `lib/scheduler.mjs` 消费：每 30 秒对一次表，
+  命中「日期 + 星期 + 时分」就跑一次 `postRun({trigger:'scheduled'})`，
+  同一分钟只跑一次（状态记在 `~/.dsh/wechat-digest/schedule-state.json`）。
+- 定时与「立即总结」/MCP 工具共用同一个 `postRun` 与同一把跨进程文件锁
+  （`<dataDir>/run.lock`），所以定时触发不可能绕过闸门，也不会与手动触发并发重复计费。
 - 两条路径在闸门之前是同一段代码，这是 AC-TR1 的要求。
 
 ### 9.4 已实跑验证
 
-- `npm run verify`：111 用例全绿 + core 纯净性检查通过
+- `npm run verify`：213 用例全绿（Windows 上 212 passed + 1 skipped）+ core 纯净性检查通过
 - 真实模型调用：`deepseek-chat` 返回结构化要点
 - MCP 运行时：`list_rooms` / `run_summary` / `get_summary` 三工具可用，**无发送类工具**
 - 端到端：file 源 → 模型摘要 → 群被摘要、私聊 `PRIVATE_DISABLED`
@@ -193,6 +197,7 @@ trigger(scheduled|manual)  ← 唯一入参
 
 - `watermark` 是进程内内存态：进程重启后会重跑一遍增量窗口（`file` 源本来是全量快照，不受影响）。
 - `heuristic` 摘要质量有限；`llm` 摘要需要重启进程才会加载新配置。
-- `store` 是内存实现，未持久化；重启后 `get_summary` 读不到历史摘要。
+- `store` 已持久化到 `~/.dsh/wechat-digest/digests.jsonl`；每次读都会对齐磁盘（mtime + size），
+  因此设置页（宿主进程）写入的摘要，MCP 子进程立刻可见（有测试覆盖）。
 - 真实微信取数的 ToS 与封号风险**未评估**。
 

@@ -2,22 +2,29 @@
  * 设置 API 的共享实现：本地设置页脚本与 DSH 插件宿主半都用这一份，避免行为分叉。
  *
  * 路由/传输层只负责搬 JSON，真正的读写、校验、fail-closed 都在这里。
+ *
+ * 数据最小化（对外响应里不出现的东西）：
+ *  - 原始会话 id：只给 HMAC 句柄（roomHandle），保存时由服务端把句柄翻回 canonicalId；
+ *  - 宿主机绝对路径：只给目录名，不给完整路径。
  */
 
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { configPath, loadConfig, saveConfig, defaultConfig, toPolicy, WEEKDAYS } from './config.js';
 import { createFileAdapter } from './adapters/file.js';
 import { createFileStore } from './store-file.js';
+import { createFileLock } from './run-lock.js';
 import { createService } from './service.js';
 import { createSummarizerFromConfig } from './summarizer-factory.js';
 import { renderDigest } from './summarize.js';
 import { canonicalize } from './core/canonical.js';
 import { roomHandle } from './core/gate.js';
+import { resolveSecret as resolveSecretFromStore, describeSecret, defaultDataDir } from './secret-store.js';
 import { loadCatalog, findModel } from './models.js';
 import { resolveLlmConfig } from './llm-config.mjs';
+
+const HANDLE_RE = /^[0-9a-f]{16}$/;
 
 const WEEKDAY_LABEL = { MO: '周一', TU: '周二', WE: '周三', TH: '周四', FR: '周五', SA: '周六', SU: '周日' };
 
@@ -26,46 +33,74 @@ const DEFAULT_EXPORT_DIR = fileURLToPath(new URL('../exports', import.meta.url))
 
 export function resolvePaths(env = process.env) {
   return {
-    dataDir: env.WECHAT_DIGEST_DATA_DIR ?? join(homedir(), '.dsh', 'wechat-digest'),
+    dataDir: env.WECHAT_DIGEST_DATA_DIR ?? defaultDataDir(env),
     exportDir: env.WECHAT_DIGEST_EXPORT_DIR ?? DEFAULT_EXPORT_DIR,
   };
 }
 
-async function discoverRooms(exportDir, config = null) {
-  /** 配置里自定义的名字优先，其次是导出目录里声明的名字。 */
-  const nameOf = (key, fallback) => {
-    const custom =
-      config?.groups?.[key]?.name ??
-      config?.private?.chats?.[key]?.name ??
-      null;
-    return custom && custom.trim().length > 0 ? custom : fallback;
-  };
+/** 句柄密钥：与 MCP 侧同一个来源（env 或 <dataDir>/secret），不再有默认常量。 */
+export function resolveSecretFor(paths = resolvePaths(), env = process.env) {
+  return resolveSecretFromStore({ env, dataDir: paths.dataDir });
+}
 
-  const shape = (room) => {
-    const canon = canonicalize(room.rawId);
-    const key = canon.ok ? canon.canonicalId : room.rawId;
-    return { key, name: nameOf(key, room.name ?? '(未命名)') };
-  };
+/** 兼容旧导入名：只返回密钥字符串。 */
+export function resolveSecret(env = process.env) {
+  return resolveSecretFor(resolvePaths(env), env).secret;
+}
 
+/**
+ * 建立 handle → 会话信息 的索引。句柄是唯一的对外标识；
+ * canonicalId 只在本进程内存里用于落配置。
+ */
+async function buildRoomIndex(paths, env = process.env) {
+  const { secret } = resolveSecretFor(paths, env);
+  const map = new Map();
   try {
-    const adapter = createFileAdapter({ exportRoot: exportDir });
-    const all = await adapter.listRooms();
-    return {
-      groups: all.filter((room) => room.authoritativeKind === 'group').map(shape),
-      privates: all.filter((room) => room.authoritativeKind === 'private').map(shape),
-      error: null,
-    };
+    const adapter = createFileAdapter({ exportRoot: paths.exportDir });
+    for (const room of await adapter.listRooms()) {
+      const canon = canonicalize(room.rawId);
+      if (!canon.ok) continue;
+      map.set(roomHandle(secret, canon.canonicalId), {
+        canonicalId: canon.canonicalId,
+        kind: canon.kind,
+        name: room.name ?? null,
+      });
+    }
+    return { map, error: null };
   } catch (err) {
-    return { groups: [], privates: [], error: String(err?.code ?? err?.message ?? err) };
+    return { map, error: String(err?.code ?? err?.message ?? err) };
   }
 }
 
-/** @returns {Promise<object>} 设置页需要的全部状态 */
-export async function getState(paths = resolvePaths()) {
+/** @returns {Promise<object>} 设置页需要的全部状态（不含原始 id、不含绝对路径） */
+export async function getState(paths = resolvePaths(), env = process.env) {
   const configFile = configPath(paths.dataDir);
   const { config, error } = loadConfig(configFile);
-  const { groups, privates, error: roomsError } = await discoverRooms(paths.exportDir, config);
+  const { map, error: roomsError } = await buildRoomIndex(paths, env);
   const { catalog, error: catalogError } = loadCatalog(paths.dataDir);
+
+  const pickName = (value) => (typeof value === 'string' && value.trim().length > 0 ? value : null);
+  const nameOf = (canonicalId, fallback) =>
+    pickName(config.groups?.[canonicalId]?.name) ??
+    pickName(config.private?.chats?.[canonicalId]?.name) ??
+    fallback;
+
+  const groups = [];
+  const privates = [];
+  const selected = { groups: {}, privateChats: {} };
+
+  for (const [handle, info] of map) {
+    const shaped = { roomHandle: handle, name: nameOf(info.canonicalId, info.name ?? '(未命名)') };
+    const saved = config.groups?.[info.canonicalId] ?? config.private?.chats?.[info.canonicalId] ?? null;
+
+    if (info.kind === 'group') {
+      groups.push(shaped);
+      if (saved) selected.groups[handle] = { ...saved };
+    } else if (info.kind === 'private') {
+      privates.push(shaped);
+      if (saved) selected.privateChats[handle] = { ...saved };
+    }
+  }
 
   // 每个 provider 标注是否真的能调（有 key 且声明了 baseUrl）
   const providers = catalog.providers.map((provider) => {
@@ -84,19 +119,26 @@ export async function getState(paths = resolvePaths()) {
     };
   });
 
-  const selected = resolveLlmConfig({
+  const selectedModel = resolveLlmConfig({
     providerId: config.llm?.provider,
     modelId: config.llm?.model,
     dataDir: paths.dataDir,
   });
 
   return {
-    config,
+    // 配置本体：groups / private.chats 一律清空，避免原始会话 id 出站。
+    config: {
+      ...config,
+      groups: {},
+      private: { enabled: config.private?.enabled === true, chats: {} },
+    },
+    // 已保存的勾选状态，按句柄索引（客户端用它渲染复选框）。
+    selected,
     configError: error,
     roomsError,
     catalogError,
-    configPath: configFile,
-    exportDir: paths.exportDir,
+    dataDirName: basename(paths.dataDir),
+    exportDirName: basename(paths.exportDir),
     groups,
     privates,
     rooms: groups, // 兼容旧页面
@@ -105,15 +147,48 @@ export async function getState(paths = resolvePaths()) {
     selectedModel: {
       provider: config.llm?.provider ?? null,
       model: config.llm?.model ?? null,
-      available: selected.available,
-      reason: selected.reason,
-      label: selected.available ? `${selected.providerLabel} / ${selected.modelLabel}` : null,
+      available: selectedModel.available,
+      reason: selectedModel.reason,
+      label: selectedModel.available ? `${selectedModel.providerLabel} / ${selectedModel.modelLabel}` : null,
     },
   };
 }
 
-/** 保存配置；非法输入抛错（不写盘）。模型必须存在于注册表。 */
-export function postConfig(payload, paths = resolvePaths()) {
+/**
+ * 把客户端提交的会话表（键可能是句柄，也可能是 canonicalId）翻成 canonicalId 键。
+ * 翻不出来的句柄不静默丢：放进 unresolved 让界面提示。
+ */
+function translateRoomMap(rawMap, byHandle) {
+  const out = {};
+  const unresolved = [];
+  if (!rawMap || typeof rawMap !== 'object' || Array.isArray(rawMap)) return { out, unresolved };
+
+  for (const [key, value] of Object.entries(rawMap)) {
+    if (HANDLE_RE.test(key)) {
+      const info = byHandle.get(key);
+      if (!info) {
+        unresolved.push(key);
+        continue;
+      }
+      out[info.canonicalId] = value;
+      continue;
+    }
+    const canon = canonicalize(key);
+    if (!canon.ok) {
+      unresolved.push(key);
+      continue;
+    }
+    out[canon.canonicalId] = value;
+  }
+
+  return { out, unresolved };
+}
+
+/**
+ * 保存配置；非法输入抛错（不写盘）。模型必须存在于注册表。
+ * 异步：需要读导出目录才能把句柄翻回 canonicalId。
+ */
+export async function postConfig(payload, paths = resolvePaths(), env = process.env) {
   if (payload && typeof payload === 'object' && payload.llm) {
     const { catalog } = loadCatalog(paths.dataDir);
     const found = findModel(catalog, payload.llm.provider, payload.llm.model);
@@ -123,35 +198,61 @@ export function postConfig(payload, paths = resolvePaths()) {
       throw err;
     }
   }
-  const saved = saveConfig(configPath(paths.dataDir), payload);
-  return { ok: true, config: saved };
+
+  let body = payload;
+  const unresolved = [];
+
+  if (payload && typeof payload === 'object') {
+    const { map } = await buildRoomIndex(paths, env);
+    const groups = translateRoomMap(payload.groups, map);
+    unresolved.push(...groups.unresolved);
+
+    body = { ...payload, groups: groups.out };
+
+    // 只有客户端真的带了 private 才重建它：否则会把「缺省 enabled」变成 undefined，
+    // 让 parseConfig 报 PRIVATE_ENABLED_NOT_BOOLEAN（而不是按默认值处理）。
+    if (payload.private && typeof payload.private === 'object') {
+      const chats = translateRoomMap(payload.private.chats, map);
+      unresolved.push(...chats.unresolved);
+      body.private = { ...payload.private, chats: chats.out };
+    }
+  }
+
+  const saved = saveConfig(configPath(paths.dataDir), body);
+  return {
+    ok: true,
+    config: {
+      ...saved,
+      groups: {},
+      private: { enabled: saved.private?.enabled === true, chats: {} },
+    },
+    unresolvedHandles: unresolved,
+  };
 }
 
 /** 恢复默认。 */
 export function postReset(paths = resolvePaths()) {
   const saved = saveConfig(configPath(paths.dataDir), defaultConfig());
-  return { ok: true, config: saved };
+  return {
+    ok: true,
+    config: {
+      ...saved,
+      groups: {},
+      private: { enabled: saved.private?.enabled === true, chats: {} },
+    },
+  };
 }
 
 /**
- * 句柄密钥：必须与 MCP 侧一致，否则同一个群算出不同句柄，get_summary 就查不到。
- * 两边都用这个解析函数，默认值是同一个常量。
- */
-export function resolveSecret(env = process.env) {
-  return env.WECHAT_DIGEST_SECRET ?? 'local-dev-secret-0123456789';
-}
-
-/**
- * 立即总结：在**当前进程**里跑一次，结果写进与 MCP 相同的 digests.jsonl。
+ * 总结一次：设置页与定时器都走这里，结果写进与 MCP 相同的 digests.jsonl。
  *
- * 注意：这里不走 IPC——设置页（宿主进程）和 MCP 服务器是两个进程，
- * 但它们共用同一个数据目录与同一套策略/闸门，所以行为一致。
+ * 与 MCP 子进程共用文件锁与数据目录，因此两路不会同时跑。
  */
-export async function postRun(paths = resolvePaths()) {
+export async function postRun(paths = resolvePaths(), { trigger = 'manual', env = process.env } = {}) {
   const configFile = configPath(paths.dataDir);
   const { config, error } = loadConfig(configFile);
 
-  const secret = resolveSecret();
+  const { secret } = resolveSecretFor(paths, env);
   const adapter = createFileAdapter({ exportRoot: paths.exportDir });
 
   // 先算 handle → 名字，结果里按名字显示（不泄露原始会话 id）
@@ -162,7 +263,7 @@ export async function postRun(paths = resolvePaths()) {
       if (!canon.ok) continue;
       const custom =
         config.groups?.[canon.canonicalId]?.name ?? config.private?.chats?.[canon.canonicalId]?.name;
-      const name = custom && custom.trim().length > 0 ? custom : room.name ?? canon.canonicalId;
+      const name = custom && custom.trim().length > 0 ? custom : room.name ?? '(未命名)';
       nameByHandle.set(roomHandle(secret, canon.canonicalId), name);
     }
   } catch {
@@ -180,14 +281,16 @@ export async function postRun(paths = resolvePaths()) {
     summarize: ({ messages }) =>
       createSummarizerFromConfig(config, { dataDir: paths.dataDir })({ messages }),
     store,
+    lock: createFileLock({ dir: paths.dataDir }),
   });
 
-  const result = await service.runSummary({ trigger: 'manual' });
+  const result = await service.runSummary({ trigger });
   const created = store.all().slice(before);
 
   return {
     ok: result.status === 'COMPLETED',
     status: result.status,
+    trigger,
     configError: error,
     summarized: created.length,
     skipped: (result.skipped ?? []).length,
@@ -202,3 +305,5 @@ export async function postRun(paths = resolvePaths()) {
     })),
   };
 }
+
+export { describeSecret };

@@ -29,6 +29,21 @@ export function createSettingsServer(paths = PATHS) {
   return createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${PORT}`);
 
+    // 只服务本机：Host 必须是回环（挡 DNS rebinding），写操作必须同源。
+    const host = String(req.headers.host ?? '').toLowerCase();
+    const hostname = host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.split(':')[0];
+    if (!['127.0.0.1', 'localhost', '::1', '[::1]'].includes(hostname)) {
+      json(res, 403, { ok: false, reason: 'HOST_NOT_ALLOWED' });
+      return;
+    }
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      const origin = req.headers.origin;
+      if (typeof origin !== 'string' || new URL(origin).host.toLowerCase() !== host) {
+        json(res, 403, { ok: false, reason: 'CROSS_ORIGIN_DENIED' });
+        return;
+      }
+    }
+
     if (req.method === 'GET' && url.pathname === '/') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end(PAGE);
@@ -50,7 +65,7 @@ export function createSettingsServer(paths = PATHS) {
         return;
       }
       try {
-        json(res, 200, postConfig(incoming, paths));
+        json(res, 200, await postConfig(incoming, paths));
       } catch (err) {
         json(res, 400, { ok: false, reason: err?.message ?? 'CONFIG_INVALID' });
       }
@@ -156,7 +171,7 @@ const PAGE = `<!doctype html>
 </section>
 
 <section class="warn">
-  <div>定时触发由 DSH 的定时任务控制。页面保存的是配置；<b>改了时间需要同步到 DSH 定时任务才真正生效</b>。</div>
+  <div>定时总结由插件自己在 DSH 内消费（<code>lib/scheduler.mjs</code>），保存后按页面里的时间执行；不需要再同步 DSH 定时任务。同一分钟只会跑一次。</div>
 </section>
 
 <div>
@@ -192,20 +207,21 @@ function itemRows(items, configMap, kind, emptyText) {
   if (state.roomsError) return '<div class="empty">读不到导出目录：' + state.roomsError + '</div>';
   if (!items || items.length === 0) return '<div class="empty">' + emptyText + '</div>';
   return items.map((item) => {
-    const entry = configMap[item.key] || {};
+    const handle = item.roomHandle || item.key;
+    const entry = configMap[handle] || {};
     const checked = entry.enabled !== false ? 'checked' : '';
     const shown = entry.name && entry.name.trim() ? entry.name.trim() : item.name;
     return '<div class="item">' +
-      '<input type="checkbox" data-kind="' + kind + '" data-key="' + item.key + '" data-field="enabled" ' + checked + '>' +
+      '<input type="checkbox" data-kind="' + kind + '" data-key="' + handle + '" data-field="enabled" ' + checked + '>' +
       '<span class="name">' + shown + '</span>' +
-      '<input type="text" data-kind="' + kind + '" data-key="' + item.key + '" data-field="name" placeholder="自定义名字（可选）" value="' + (entry.name || '') + '">' +
-      '<span class="key">' + item.key + '</span>' +
+      '<input type="text" data-kind="' + kind + '" data-key="' + handle + '" data-field="name" placeholder="自定义名字（可选）" value="' + (entry.name || '') + '">' +
+      '<span class="key">' + handle + '</span>' +
     '</div>';
   }).join('');
 }
 
 function render() {
-  $('paths').textContent = '配置：' + state.configPath +
+  $('paths').textContent = '配置目录：~/.dsh/' + (state.dataDirName || 'wechat-digest') +
     (state.configError ? '　⚠ 配置有问题：' + state.configError + '（已按全关处理）' : '');
 
   $('groupsEnabled').checked = draft.groupsEnabled;
@@ -258,9 +274,9 @@ async function load() {
   state = body;
   draft = {
     groupsEnabled: body.config.groupsEnabled !== false,
-    groups: Object.assign({}, body.config.groups),
+    groups: Object.assign({}, (body.selected && body.selected.groups) || {}),
     privateEnabled: !!body.config.private.enabled,
-    privateChats: Object.assign({}, (body.config.private && body.config.private.chats) || {}),
+    privateChats: Object.assign({}, (body.selected && body.selected.privateChats) || {}),
     summarizer: body.config.summarizer,
     provider: (body.config.llm && body.config.llm.provider) || '',
     model: (body.config.llm && body.config.llm.model) || '',

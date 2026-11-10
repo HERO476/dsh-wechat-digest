@@ -54,7 +54,8 @@ export function parseConfig(raw) {
   if (raw.version !== CONFIG_VERSION) return bad(`BAD_VERSION:${String(raw.version)}`);
 
   // groups：键是会话 id，值显式声明开或关
-  const groups = {};
+  // Object.create(null)：防止 "__proto__" 这类键改写本地对象原型（静默丢配置）。
+  const groups = Object.create(null);
   const rawGroups = raw.groups ?? {};
   if (rawGroups === null || typeof rawGroups !== 'object' || Array.isArray(rawGroups)) {
     return bad('GROUPS_NOT_OBJECT');
@@ -62,6 +63,8 @@ export function parseConfig(raw) {
   for (const [id, value] of Object.entries(rawGroups)) {
     const canon = canonicalize(id);
     if (!canon.ok) return bad(`GROUP_BAD_ID:${canon.reason}`);
+    // 只接受真正的会话：未分类/被排除的 id 写进来只会变成静默死配置。
+    if (canon.kind === 'unknown' || canon.kind === 'excluded') return bad(`GROUP_BAD_KIND:${canon.kind}`);
     if (!value || typeof value !== 'object' || Array.isArray(value)) return bad('GROUP_NOT_OBJECT');
     for (const key of Object.keys(value)) {
       if (!GROUP_KEYS.has(key)) return bad(`GROUP_UNKNOWN_KEY:${key}`);
@@ -88,7 +91,7 @@ export function parseConfig(raw) {
   }
   if (typeof rawPrivate.enabled !== 'boolean') return bad('PRIVATE_ENABLED_NOT_BOOLEAN');
 
-  const chats = {};
+  const chats = Object.create(null);
   const rawChats = rawPrivate.chats ?? {};
   if (rawChats === null || typeof rawChats !== 'object' || Array.isArray(rawChats)) {
     return bad('PRIVATE_CHATS_NOT_OBJECT');
@@ -96,6 +99,7 @@ export function parseConfig(raw) {
   for (const [id, value] of Object.entries(rawChats)) {
     const canon = canonicalize(id);
     if (!canon.ok) return bad(`PRIVATE_CHAT_BAD_ID:${canon.reason}`);
+    if (canon.kind === 'unknown' || canon.kind === 'excluded') return bad(`PRIVATE_CHAT_BAD_KIND:${canon.kind}`);
     if (!value || typeof value !== 'object' || Array.isArray(value)) return bad('PRIVATE_CHAT_NOT_OBJECT');
     for (const key of Object.keys(value)) {
       if (!GROUP_KEYS.has(key)) return bad(`PRIVATE_CHAT_UNKNOWN_KEY:${key}`);

@@ -3,6 +3,12 @@
  *
  * 为什么不把 env 写进 cordis.patch.yml：我不确定该客户端配置是否支持 `env` 键，
  * 一个不支持的键可能让整个 profile 起不来。写成包装脚本就与配置 schema 无关。
+ * （事后在 ~/.dsh/cordis.patch.yml 的 rea-mcp 条目里见到 env 是支持的，
+ *  但保留包装脚本仍有用：它负责推导导出目录与模型配置。）
+ *
+ * 句柄密钥：**不在这里设默认值**。由 mcp-server.js 通过 secret-store 解析
+ * （环境变量 → <dataDir>/secret，首次自动生成 32 字节随机值），
+ * 这样仓库里不再存在一个公开的固定密钥，宿主半与子进程也共用同一份。
  *
  * 模型密钥：优先环境变量 WECHAT_DIGEST_LLM_API_KEY，
  * 否则运行时从 ~/.dsh/.credentials.yaml 的 DEEPSEEK_API_KEY 读取。
@@ -20,7 +26,6 @@ const DEFAULT_EXPORT_DIR = fileURLToPath(new URL('../exports', import.meta.url))
 
 process.env.WECHAT_DIGEST_SOURCE ??= 'file';
 process.env.WECHAT_DIGEST_EXPORT_DIR ??= DEFAULT_EXPORT_DIR;
-process.env.WECHAT_DIGEST_SECRET ??= 'local-dev-secret-0123456789';
 process.env.WECHAT_DIGEST_DATA_DIR ??= join(homedir(), '.dsh', 'wechat-digest');
 
 const summarizerMode = process.env.WECHAT_DIGEST_SUMMARIZER ?? 'llm';

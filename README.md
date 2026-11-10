@@ -52,7 +52,7 @@ samples/export-template/      导出格式模板（一个群 + 一个私聊）
 
 ```bash
 npm run check          # core 纯净性 + 零写能力静态检查
-npm run test           # 全部用例（当前 164 个）
+npm run test           # 全部用例（当前 213 个）
 npm run verify         # 两个都跑
 
 node scripts/demo.mjs                                       # fixture 演示（本地关键词）
@@ -68,7 +68,8 @@ node src/mcp-server.js                                      # MCP stdio 服务�
 > `spawn EPERM` 失败（不是测试本身的问题）。`scripts/run-tests.mjs` 改为本进程内顺序 import，
 > 由 `node:test` 在退出时汇总。
 
-在 Node 24.20.0 上实测：164 passed / 0 failed（连续 5 次稳定）。
+在 Node 24.20.0 上实测：212 passed / 0 failed / 1 skipped
+（跳过的是 POSIX 专有的密钥文件权限位用例，Windows 上不适用）。
 
 ## 设置页
 
@@ -95,8 +96,20 @@ node src/mcp-server.js                                      # MCP stdio 服务�
 - **总开关优先**：群聊或私聊的总开关一关，对应的单会话勾选立即失效——
   不会因为某条遗留勾选而漏读。
 - **配置写坏 → 全关**（fail-closed），不会回退成"默认允许"。
+- **定时真的会跑**：`config.schedule` 由插件自己消费（`lib/scheduler.mjs`，每 30 秒对一次表，
+  同一分钟只跑一次，记账文件 `~/.dsh/wechat-digest/schedule-state.json`）。
+  跑的时候走的是与「立即总结」完全相同的 `postRun` → 同一道策略闸门。
+- **撤销立即生效**：取消勾选某个群之后，它的历史摘要也读不出来了
+  （`get_summary` 会用当前策略复核，返回 `DENIED`）。
 
-独立页只监听 `127.0.0.1`，不做鉴权（本机自用）。
+设置接口的访问控制：
+
+- 只接受 **Host 为回环地址**（`127.0.0.1` / `localhost` / `[::1]`）的请求，
+  挡 DNS rebinding；要用公网隧道必须先显式写进 `WECHAT_DIGEST_ALLOWED_HOSTS`。
+- **写操作（POST）必须带同源 `Origin`**：浏览器一定带，`curl` 不带 → 403。
+  所以「一条 curl 就能改配置」这条路已经关了。
+- 读操作（GET）不要求 Origin，但同样受 Host 白名单约束。
+- 独立设置页与 DSH 面板用同一套规则（`127.0.0.1:7199` 上也做同样的 Host/Origin 校验）。
 
 ### 支持的模型（多 provider）
 
@@ -119,6 +132,15 @@ node src/mcp-server.js                                      # MCP stdio 服务�
   "baseUrl": "http://127.0.0.1:11434/v1", "apiKeyEnv": "OLLAMA_API_KEY",
   "callable": true, "models": [{ "id": "qwen3", "label": "Qwen3" }] }] }
 ```
+
+`models.json` 是**白名单构造**，不是整体展开：
+
+- `baseUrl` 只允许 `https:`；`http:` 仅放行 `127.0.0.1` / `localhost` / `::1`（本地模型）；
+- `apiKeyEnv` 必须是合法环境变量名；
+- `headers` 只保留已知头（`authorization` / `content-type` / `x-api-key` …），未知头与换行注入丢弃；
+- 其余字段（`injectCommand` 之类）一律忽略，不进入注册表。
+
+这样一份「能写 models.json」就不再等于「能把聊天内容 + DSH 凭证发到任意地址」。
 
 查看当前可用性：`node scripts/llm-smoke.mjs --list`
 
@@ -152,11 +174,14 @@ node src/mcp-server.js                                      # MCP stdio 服务�
 
 ### 兼容性说明
 
-- `dsh.engines.dsh` 已对齐同机可用插件的区间，避免"skipping profile bundle"式静默跳过。
+- `dsh.engines.dsh` = `>=0.2.0 <0.3.0`（只声明实测过的区间，不再用一长串互相吞并的区间）。
+- **没有声明 `peerDependencies`**：宿主包名在不同版本间不稳定，猜错名字会让整个 bundle 被跳过
+  （`skipping profile bundle`），比没有门控更糟。宁可留这条已知缺口，并在启动时打印能力自检。
 - API 使用面是可用插件的**子集**（`ctx.slots` / `slots.inject` / `slots.register` /
   `ctx.inject` / `scope.effect` / `webServer.register`）。
 - `dsh.client.inject` 里的两个 UI 包由 shell 运行时提供，**不在 node_modules 属正常**。
-- **没有运行时版本门控**：DSH 升级若改动 `settings.section` 契约，只会表现成面板 404 或分区消失。
+- **仍然没有运行时版本门控**：DSH 升级若改动 `settings.section` 契约，只会表现成面板 404 或分区消失。
+  启动日志会打印路由注册结果，便于第一时间发现。
 
 ## 摘要落盘
 
@@ -166,8 +191,9 @@ node src/mcp-server.js                                      # MCP stdio 服务�
 聊天原文与原始会话 id **不会落盘**——不是"过滤掉了"，是写入代码里没有这两条路（有测试断言）。
 损坏行启动时跳过并计数，不会让服务起不来。
 
-> **注意**：存储是「启动时读盘 + 运行期追加」。**外部手动改/清这个文件，不会影响已经在运行的 MCP 进程**
-> （它把内容缓存在内存里）。要让改动生效，得重启 DSH。
+> **注意**：存储每次读都会先对齐磁盘（比较 mtime + size，变了就重读）。
+> 因此设置页（宿主进程）写进去的摘要，MCP 子进程**立刻**就能读到；
+> 手工编辑这个文件也会被下一次读取看到，不需要重启。
 
 > 注意：MCP 子进程是**一次启动、长期运行**的。改了 `src/` 下的代码后，
 > 正在跑的那个子进程不会重新加载——需要重启 DSH 才会用上新代码
@@ -182,18 +208,31 @@ node src/mcp-server.js                                      # MCP stdio 服务�
 | 变量 | 说明 |
 |---|---|
 | `WECHAT_DIGEST_SOURCE` | `fixture`（默认）/ `file` / `wechat` |
-| `WECHAT_DIGEST_SECRET` | 句柄 HMAC 密钥，至少 16 字符 |
+| `WECHAT_DIGEST_SECRET` | 句柄 HMAC 密钥，≥16 字符。**不给就自动用 `<dataDir>/secret`**（首次生成 32 字节随机值，两半共用） |
 | `WECHAT_DIGEST_EXPORT_DIR` | `file` 模式的导出根目录 |
 | `WECHAT_DIGEST_DATA_DIR` | 摘要落盘目录（默认 `~/.dsh/wechat-digest`） |
 | `WECHAT_DIGEST_DATA_ROOT` | `wechat` 模式的数据根 |
 | `WECHAT_DIGEST_ACCOUNT` | `wechat` 模式绑定的 `wxid_*`（多账号时必须显式指定） |
+| `WECHAT_DIGEST_ALLOWED_HOSTS` | 逗号分隔的额外允许 Host（默认只有回环；要用隧道就写隧道域名） |
+| `WECHAT_DIGEST_SCHEDULER` | `off` 可关掉宿主半的定时器（测试/排障用） |
 
 暴露的工具：`list_rooms` / `run_summary` / `get_summary`——**没有任何发送类工具**。
 
-> **安装状态：已写入 profile，等待重启 DSH 生效。**
+工具语义与 `annotations` 一致（宿主据此判断副作用）：
+
+| 工具 | `readOnlyHint` | 实际行为 |
+|---|---|---|
+| `list_rooms` | `true` | 只读导出目录 |
+| `get_summary` | `true` | 只读本地摘要文件，并按当前策略复核 |
+| `run_summary` | **`false`** | **读消息 → 调用模型（出网 + 计费）→ 写摘要文件** |
+
+`run_summary` 的描述里不再出现「只读」；`test/toolSurface.test.js` 会断言文案与注解一致，
+写反了直接测试失败。
+
+> **安装状态：已写入 profile 并生效。**
 > 条目 `mcp-wechat-digest` 已追加进 `C:\Users\<你的用户名>\.dsh\profiles\desktop\cordis.patch.yml`
 > （追加前已备份为 `.bak.<时间戳>`），并通过 PyYAML 解析校验。
-> 重启后工具列表里应出现上面三个工具。撤回方式见 [INSTALL.md](./docs/INSTALL.md)。
+> 工具列表里应出现上面三个工具。撤回方式见 [INSTALL.md](./docs/INSTALL.md)（含 MCP 行与数据目录两处）。
 >
 > 摘要器默认已切到 `llm`（`deepseek-chat`），模型密钥**运行时从 `~/.dsh/.credentials.yaml`
 > 的 `DEEPSEEK_API_KEY` 读取，不落仓库、不进日志**。想退回本地关键词规则：
