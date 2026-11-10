@@ -1,6 +1,6 @@
 {
   "name": "dsh-wechat-digest",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "只读的微信聊天摘要插件：按需选择群聊/私聊，用模型抽取重点活动与待办，含 DSH 设置项与 MCP 工具；零发送能力。与 dsh-wechat 系列桥接插件方向相反——本插件只读，不发送消息。",
   "type": "module",
   "main": "lib/index.js",
