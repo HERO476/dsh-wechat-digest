@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { squeezeCjk, normalizePunct, isTimeMarker, looksLikeSender, parseOcrLines, toMessagesText, dedupe, withBaseDate, mergeWrappedRows, isUiNoise, isDateDivider } from '../src/ocr-parse.mjs';
+import { squeezeCjk, normalizePunct, isTimeMarker, looksLikeSender, parseOcrLines, toMessagesText, dedupe, withBaseDate, mergeWrappedRows, isUiNoise, isDateDivider, isRightSideAligned } from '../src/ocr-parse.mjs';
 
 test('去掉 OCR 在中文字之间插入的空格', () => {
   assert.equal(squeezeCjk('周 五 前 把 评 审 稿 交 上 来 ， 数 据 口 径'), '周五前把评审稿交上来，数据口径');
@@ -190,4 +190,43 @@ test('纯界面噪音不会变成"消息"', () => {
   const { messages, warnings } = parseOcrLines(lines, { pageWidth: 900 });
   assert.equal(messages.length, 1);
   assert.ok(warnings.some((w) => w.includes('界面文案')), JSON.stringify(warnings));
+});
+
+test('同一人连续发言：名字只出现一次，后续继承该发送者', () => {
+  const lines = [
+    { text: '09:12', x: 400, y: 10, w: 40, h: 16 },
+    { text: '小 王', x: 40, y: 40, w: 30, h: 18 },
+    { text: '第一条：周五前把评审稿交上来，数据口径按上周定的来。', x: 40, y: 70, w: 520, h: 24 },
+    { text: '第二条：我下午补充一下附录部分的内容。', x: 40, y: 120, w: 460, h: 24 },
+  ];
+  const { messages, warnings } = parseOcrLines(lines, { pageWidth: 900 });
+  assert.equal(messages.length, 2, JSON.stringify(messages));
+  assert.equal(messages[0].sender, '小王');
+  assert.equal(messages[1].sender, '小王', '第二条没有名字，应继承上一条');
+  assert.deepEqual(warnings, []);
+});
+
+test('时间标记之后发送者上下文重置（不会把上一位的名字带过去）', () => {
+  const lines = [
+    { text: '09:12', x: 400, y: 10, w: 40, h: 16 },
+    { text: '小 王', x: 40, y: 40, w: 30, h: 18 },
+    { text: '第一条消息内容在这里，长度足够当正文。', x: 40, y: 70, w: 420, h: 24 },
+    { text: '10:20', x: 400, y: 130, w: 40, h: 16 },
+    { text: '另一条没有名字的消息，长度也够。', x: 40, y: 160, w: 380, h: 24 },
+  ];
+  const { messages, warnings } = parseOcrLines(lines, { pageWidth: 900 });
+  assert.equal(messages.length, 2);
+  assert.equal(messages[0].sender, '小王');
+  assert.equal(messages[1].sender, '未知发送者', '时间跳段后不该继承');
+  assert.ok(warnings.some((w) => w.includes('无法判定发送者')));
+});
+
+test('右侧判定看右边界（长消息左起点靠左也算我发的）', () => {
+  // 长消息：左起点只到页面 30%，但右边界贴近 95%
+  assert.equal(isRightSideAligned({ x: 270, y: 0, w: 585 }, 900), true);
+  // 对方消息：左对齐，右边界只到一半
+  assert.equal(isRightSideAligned({ x: 40, y: 0, w: 400 }, 900), false);
+  // 没有宽度信息时退回旧判据
+  assert.equal(isRightSideAligned({ x: 600, w: 0 }, 900), true);
+  assert.equal(isRightSideAligned({ x: 100, w: 0 }, 900), false);
 });

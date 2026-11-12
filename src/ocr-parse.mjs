@@ -85,6 +85,22 @@ export function isUiNoise(text) {
   return false;
 }
 
+/**
+ * 右侧气泡判定：微信里"我发的"消息**右对齐**，所以看的是**右边界贴近页面右边**，
+ * 而不是左起点超过某个比例（长消息左起点会很靠左，用左起点会误判成对方发的）。
+ */
+export function isRightSideAligned(row, pageWidth, { rightRatio = 0.9, minLeftRatio = 0.28 } = {}) {
+  if (!pageWidth || pageWidth <= 0) return false;
+  const width = Number(row?.w ?? 0);
+  const left = Number(row?.x ?? 0);
+  if (width <= 0) {
+    // 没有宽度信息时退回旧判据
+    return left > pageWidth * 0.55;
+  }
+  const right = left + width;
+  return right >= pageWidth * rightRatio && left >= pageWidth * minLeftRatio;
+}
+
 /** 只有日期没有时分（微信里的日期分隔条），不是消息。 */
 export function isDateDivider(text) {
   const t = String(text ?? '').replace(/\s+/g, '');
@@ -182,6 +198,7 @@ export function parseOcrLines(lines, options = {}) {
 
   let currentTime = defaultTime;
   let pendingSender = null;
+  let currentSender = null;
   let dropped = 0;
   let noise = 0;
 
@@ -197,6 +214,7 @@ export function parseOcrLines(lines, options = {}) {
       // 日期分隔条：只影响时间上下文，不产生消息
       currentTime = withBaseDate(row.text, baseDate);
       pendingSender = null;
+      currentSender = null;
       continue;
     }
 
@@ -206,10 +224,11 @@ export function parseOcrLines(lines, options = {}) {
       // 给了 baseDate 时补成完整日期（OCR 常把日期读残）。
       currentTime = withBaseDate(row.text, baseDate);
       pendingSender = null;
+      currentSender = null;
       continue;
     }
 
-    const isRight = pageWidth > 0 && row.x > pageWidth * 0.55;
+    const isRight = isRightSideAligned(row, pageWidth);
 
     // 右侧的 3-4 位纯数字（OCR 把 "10:05" 读成 "1005"）是时间戳噪音，不是消息
     if (isRight && /^\d{3,4}$/.test(row.text)) continue;
@@ -220,7 +239,8 @@ export function parseOcrLines(lines, options = {}) {
     const followedByBody =
       Boolean(next) &&
       !isTimeMarker(next.text) &&
-      !(pageWidth > 0 && next.x > pageWidth * 0.55) &&
+      !isDateDivider(next.text) &&
+      !isRightSideAligned(next, pageWidth) &&
       (!looksLikeSender(next.text) || next.text.length > row.text.length);
 
     if (!isRight && looksLikeSender(row.text) && followedByBody) {
@@ -234,14 +254,21 @@ export function parseOcrLines(lines, options = {}) {
       continue;
     }
 
+    // 微信只在同一人的第一条显示名字：后续消息继承上一条的发送者。
+    const sender = isRight ? selfSender : pendingSender ?? currentSender ?? '未知发送者';
+
     messages.push({
       at: currentTime,
-      sender: isRight ? selfSender : pendingSender ?? '未知发送者',
+      sender,
       text: row.text,
     });
 
-    if (!isRight && pendingSender === null) {
-      warnings.push(`无法判定发送者的行：${row.text.slice(0, 12)}`);
+    if (!isRight) {
+      if (sender === '未知发送者') {
+        warnings.push(`无法判定发送者的行：${row.text.slice(0, 12)}`);
+      } else {
+        currentSender = sender;
+      }
     }
     pendingSender = null;
   }
