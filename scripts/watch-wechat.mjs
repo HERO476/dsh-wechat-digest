@@ -56,6 +56,7 @@ function usage(code = 0) {
     '  --once             只采一屏',
     '  --date YYYY-MM-DD  当前日期：把 OCR 里残缺的日期补全',
     '  --scale 1|2|3      OCR 前放大倍数（默认 2，对小字更友好）',
+    '  --invert 0|1|auto  反色（默认 0；实测深色截图不反色也能识别，异常时可试 1）',
     '  --out <目录>       导出根目录（默认 <仓库>/exports）',
   ].join('\n');
   process.stderr.write(`${msg}\n`);
@@ -72,6 +73,7 @@ function parseArgs(argv) {
     once: false,
     date: '',
     scale: 2,
+    invert: '0',
     out: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -81,6 +83,7 @@ function parseArgs(argv) {
     else if (a === '--kind') o.kind = argv[++i];
     else if (a === '--out') o.out = argv[++i];
     else if (a === '--date') o.date = argv[++i];
+    else if (a === '--invert') o.invert = argv[++i];
     else if (a === '--interval') o.interval = Number(argv[++i]);
     else if (a === '--max-frames') o.maxFrames = Number(argv[++i]);
     else if (a === '--scale') o.scale = Number(argv[++i]);
@@ -135,7 +138,7 @@ function capture(shotPath) {
   };
 }
 
-function ocr(shotPath, jsonPath, scale) {
+function ocr(shotPath, jsonPath, scale, invert = 'auto') {
   const stdout = runPs(OCR_PS1, [
     '-ImagePath',
     shotPath,
@@ -143,6 +146,8 @@ function ocr(shotPath, jsonPath, scale) {
     jsonPath,
     '-Scale',
     String(Math.min(3, Math.max(1, scale || 2))),
+    '-Invert',
+    invert,
   ]);
   const err = /^ERR\s+(.*)$/m.exec(String(stdout ?? '').trim());
   if (err) {
@@ -237,7 +242,7 @@ function main() {
 
     let payload;
     try {
-      payload = ocr(shot, json, o.scale);
+      payload = ocr(shot, json, o.scale, o.invert);
     } catch (err) {
       stats.errors += 1;
       const hint = CODE_HINT[err.code] ?? '';

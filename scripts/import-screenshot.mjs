@@ -37,6 +37,9 @@ function usage(code = 0) {
     '  --kind    group（默认）或 private',
     '  --append  追加到已有 messages.txt（默认覆盖）',
     '  --out     导出根目录（默认 <仓库>/exports，可用 WECHAT_DIGEST_EXPORT_DIR 覆盖）',
+    '  --date    YYYY-MM-DD：把 OCR 里残缺的日期补全',
+    '  --scale   1|2|3：OCR 前放大倍数（默认 2）',
+    '  --invert  0|1|auto：反色（默认 0）',
   ].join('\n');
   process.stderr.write(`${msg}\n`);
   process.exit(code);
@@ -44,14 +47,16 @@ function usage(code = 0) {
 
 function parseArgs(argv) {
   const images = [];
-  const opts = { room: null, slug: null, kind: 'group', append: false, out: null };
-
+  const opts = { room: null, slug: null, kind: 'group', append: false, out: null, date: '', scale: 2, invert: '0' };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--room') opts.room = argv[++i];
     else if (arg === '--slug') opts.slug = argv[++i];
     else if (arg === '--kind') opts.kind = argv[++i];
     else if (arg === '--out') opts.out = argv[++i];
+    else if (arg === '--date') opts.date = argv[++i];
+    else if (arg === '--scale') opts.scale = Number(argv[++i]);
+    else if (arg === '--invert') opts.invert = argv[++i];
     else if (arg === '--append') opts.append = true;
     else if (arg === '-h' || arg === '--help') usage(0);
     else if (arg.startsWith('--')) usage(2);
@@ -77,7 +82,7 @@ function slugFor(name, explicit) {
   return `ocr-${h.toString(36)}`;
 }
 
-function ocrImage(imagePath) {
+function ocrImage(imagePath, { scale = 2, invert = '0' } = {}) {
   const abs = resolve(imagePath);
   if (!existsSync(abs)) {
     throw Object.assign(new Error(`IMAGE_NOT_FOUND: ${abs}`), { code: 'IMAGE_NOT_FOUND' });
@@ -86,12 +91,26 @@ function ocrImage(imagePath) {
   const out = abs.replace(/\.[^.]+$/, '') + '.ocr.json';
   const stdout = execFileSync(
     'powershell',
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', PS1, '-ImagePath', abs, '-OutPath', out],
+    [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      PS1,
+      '-ImagePath',
+      abs,
+      '-OutPath',
+      out,
+      '-Scale',
+      String(Math.min(3, Math.max(1, Number(scale) || 2))),
+      '-Invert',
+      invert,
+    ],
     { encoding: 'utf8' },
   );
 
   if (/^ERR/m.test(stdout) || !existsSync(out)) {
-    throw Object.assign(new Error(`OCR_FAILED: ${stdout.trim()}`), { code: 'OCR_FAILED' });
+    throw Object.assign(new Error(`OCR_FAILED: ${String(stdout).trim()}`), { code: 'OCR_FAILED' });
   }
 
   const payload = JSON.parse(readFileSync(out, 'utf8').replace(/^\uFEFF/, ''));
@@ -129,9 +148,9 @@ function main() {
   let totalLines = 0;
 
   for (const image of images) {
-    const { payload } = ocrImage(image);
+    const { payload } = ocrImage(image, { scale: opts.scale, invert: opts.invert });
     totalLines += payload.lines?.length ?? 0;
-    const parsed = parseOcrLines(payload.lines, { pageWidth: payload.pageWidth ?? 0 });
+    const parsed = parseOcrLines(payload.lines, { pageWidth: payload.pageWidth ?? 0, baseDate: opts.date || '' });
     all.push(...parsed.messages);
     warnings = warnings.concat(parsed.warnings);
   }

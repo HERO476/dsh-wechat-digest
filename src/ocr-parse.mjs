@@ -59,6 +59,40 @@ export function looksLikeSender(text) {
   return true;
 }
 
+/** 纯 UI 噪点（微信界面固定文案），不该当成聊天内容。 */
+const UI_NOISE = new Set([
+  '以下为新消息',
+  '查看更多消息',
+  '对方正在输入',
+  '对方正在输入...',
+  '消息已发出',
+  '已撤回',
+  '撤回了一条消息',
+  '发送失败，请重试',
+  '按住说话',
+  '长按说话',
+  '聊天信息',
+  '通讯录',
+  '发现',
+]);
+
+export function isUiNoise(text) {
+  const t = String(text ?? '').trim();
+  if (t.length === 0) return true;
+  if (UI_NOISE.has(t)) return true;
+  // 纯标点 / 纯符号 / 纯空白
+  if (/^[\p{P}\p{S}\s]+$/u.test(t)) return true;
+  return false;
+}
+
+/** 只有日期没有时分（微信里的日期分隔条），不是消息。 */
+export function isDateDivider(text) {
+  const t = String(text ?? '').replace(/\s+/g, '');
+  if (t.length === 0) return false;
+  if (/\d{1,2}:\d{2}/.test(t)) return false;
+  return /^(昨天|前天|今天|星期[一二三四五六日天]|周[一二三四五六日天]|\d{1,2}月\d{1,2}日|20\d{2}年\d{1,2}月\d{1,2}日)$/.test(t);
+}
+
 /** 把 HH:MM 补成带日期的完整时间；没有基础日期就原样返回。 */
 export function withBaseDate(marker, baseDate) {
   const t = String(marker ?? '').replace(/\s+/g, '');
@@ -149,9 +183,22 @@ export function parseOcrLines(lines, options = {}) {
   let currentTime = defaultTime;
   let pendingSender = null;
   let dropped = 0;
+  let noise = 0;
 
   for (let i = 0; i < rows.length; i += 1) {
     const row = rows[i];
+
+    if (isUiNoise(row.text)) {
+      noise += 1;
+      continue;
+    }
+
+    if (isDateDivider(row.text)) {
+      // 日期分隔条：只影响时间上下文，不产生消息
+      currentTime = withBaseDate(row.text, baseDate);
+      pendingSender = null;
+      continue;
+    }
 
     if (isTimeMarker(row.text)) {
       // 时间标记只保留"压缩后"的形态：OCR 常把 "2026年11月10日 09:12" 读成
@@ -203,6 +250,7 @@ export function parseOcrLines(lines, options = {}) {
     warnings.push(`末尾残留疑似发送者名：${pendingSender}`);
   }
   if (dropped > 0) warnings.push(`丢弃 ${dropped} 行单字符噪音`);
+  if (noise > 0) warnings.push(`过滤 ${noise} 行界面文案`);
 
   return { messages, warnings };
 }

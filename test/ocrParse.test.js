@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { squeezeCjk, normalizePunct, isTimeMarker, looksLikeSender, parseOcrLines, toMessagesText, dedupe, withBaseDate, mergeWrappedRows } from '../src/ocr-parse.mjs';
+import { squeezeCjk, normalizePunct, isTimeMarker, looksLikeSender, parseOcrLines, toMessagesText, dedupe, withBaseDate, mergeWrappedRows, isUiNoise, isDateDivider } from '../src/ocr-parse.mjs';
 
 test('去掉 OCR 在中文字之间插入的空格', () => {
   assert.equal(squeezeCjk('周 五 前 把 评 审 稿 交 上 来 ， 数 据 口 径'), '周五前把评审稿交上来，数据口径');
@@ -152,4 +152,42 @@ test('--date 生效时消息时间带上完整日期', () => {
   ];
   const { messages } = parseOcrLines(lines, { pageWidth: 900, baseDate: '2026-11-12' });
   assert.equal(messages[0].at, '2026-11-12 09:12');
+});
+
+test('界面固定文案与纯符号被过滤掉', () => {
+  for (const t of ['以下为新消息', '查看更多消息', '对方正在输入', '消息已发出', '撤回了一条消息', '···', '——']) {
+    assert.equal(isUiNoise(t), true, t);
+  }
+  for (const t of ['周五前交评审稿', '收到', '待办：确认预算']) {
+    assert.equal(isUiNoise(t), false, t);
+  }
+});
+
+test('只有日期的分隔条不算消息，但会更新时间上下文', () => {
+  assert.equal(isDateDivider('11月12日'), true);
+  assert.equal(isDateDivider('昨天'), true);
+  assert.equal(isDateDivider('周三'), true);
+  assert.equal(isDateDivider('09:12'), false, '带时分的是时间标记，不是日期条');
+
+  const lines = [
+    { text: '11月12日', x: 380, y: 10, w: 80, h: 18 },
+    { text: '09:12', x: 380, y: 40, w: 60, h: 18 },
+    { text: '小 王', x: 40, y: 70, w: 30, h: 18 },
+    { text: '周五前把评审稿交上来，数据口径按上周定的来。', x: 40, y: 100, w: 420, h: 24 },
+  ];
+  const { messages } = parseOcrLines(lines, { pageWidth: 900 });
+  assert.equal(messages.length, 1, JSON.stringify(messages));
+  assert.equal(messages[0].sender, '小王');
+});
+
+test('纯界面噪音不会变成"消息"', () => {
+  const lines = [
+    { text: '以下为新消息', x: 300, y: 10, w: 120, h: 16 },
+    { text: '09:12', x: 400, y: 40, w: 40, h: 16 },
+    { text: '小 王', x: 40, y: 70, w: 30, h: 18 },
+    { text: '周五前把评审稿交上来，数据口径按上周定的来。', x: 40, y: 100, w: 420, h: 24 },
+  ];
+  const { messages, warnings } = parseOcrLines(lines, { pageWidth: 900 });
+  assert.equal(messages.length, 1);
+  assert.ok(warnings.some((w) => w.includes('界面文案')), JSON.stringify(warnings));
 });
