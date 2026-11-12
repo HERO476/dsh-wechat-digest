@@ -9,6 +9,8 @@
  */
 
 import { basename, join } from 'node:path';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import { configPath, loadConfig, saveConfig, defaultConfig, toPolicy, WEEKDAYS } from './config.js';
@@ -23,6 +25,7 @@ import { roomHandle } from './core/gate.js';
 import { resolveSecret as resolveSecretFromStore, describeSecret, defaultDataDir } from './secret-store.js';
 import { loadCatalog, findModel } from './models.js';
 import { resolveLlmConfig } from './llm-config.mjs';
+import { importScreenshot } from './screenshot-import.mjs';
 
 const HANDLE_RE = /^[0-9a-f]{16}$/;
 
@@ -307,3 +310,67 @@ export async function postRun(paths = resolvePaths(), { trigger = 'manual', env 
 }
 
 export { describeSecret };
+
+const MAX_IMAGE_BYTES = 9 * 1024 * 1024;
+
+/**
+ * 设置页上传截图：把 base64 图片落到临时文件 → 复用同一条 OCR/解析/入库流水线。
+ * 只写 exports/ 与临时目录；不碰微信进程。
+ */
+export function postImport(payload, paths = resolvePaths(), deps = {}) {
+  const { room, kind = 'group', filename = 'shot.png', dataBase64, date = '', append = false, slug } = payload ?? {};
+
+  if (typeof room !== 'string' || room.trim().length === 0) {
+    throw Object.assign(new Error('ROOM_REQUIRED'), { code: 'ROOM_REQUIRED' });
+  }
+  if (typeof dataBase64 !== 'string' || dataBase64.length === 0) {
+    throw Object.assign(new Error('IMAGE_REQUIRED'), { code: 'IMAGE_REQUIRED' });
+  }
+
+  const comma = dataBase64.indexOf(',');
+  const raw = comma >= 0 ? dataBase64.slice(comma + 1) : dataBase64;
+  let buffer;
+  try {
+    buffer = Buffer.from(raw, 'base64');
+  } catch {
+    throw Object.assign(new Error('IMAGE_NOT_BASE64'), { code: 'IMAGE_NOT_BASE64' });
+  }
+  if (buffer.length === 0) throw Object.assign(new Error('IMAGE_EMPTY'), { code: 'IMAGE_EMPTY' });
+  if (buffer.length > MAX_IMAGE_BYTES) {
+    throw Object.assign(new Error(`IMAGE_TOO_LARGE:${buffer.length}`), { code: 'IMAGE_TOO_LARGE' });
+  }
+
+  const ext = /\.(png|jpe?g|webp|bmp)$/i.exec(String(filename))?.[1]?.toLowerCase() ?? 'png';
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-wechat-upload-'));
+  const imagePath = join(dir, `upload.${ext}`);
+
+  try {
+    writeFileSync(imagePath, buffer);
+    const result = importScreenshot({
+      imagePath,
+      room: room.trim(),
+      kind,
+      slug,
+      date,
+      append: append === true,
+      exportDir: paths.exportDir,
+      runner: deps.runner,
+    });
+    return {
+      ok: true,
+      room: result.room,
+      kind: result.kind,
+      slug: result.slug,
+      dir: result.dir,
+      ocrLines: result.ocrLines,
+      messages: result.messages,
+      warnings: result.warnings.slice(0, 5),
+    };
+  } finally {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* 临时目录清理失败不影响结果 */
+    }
+  }
+}

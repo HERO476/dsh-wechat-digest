@@ -57,6 +57,8 @@ function usage(code = 0) {
     '  --date YYYY-MM-DD  当前日期：把 OCR 里残缺的日期补全',
     '  --scale 1|2|3      OCR 前放大倍数（默认 2，对小字更友好）',
     '  --invert 0|1|auto  反色（默认 0；实测深色截图不反色也能识别，异常时可试 1）',
+    '  --scroll <n>       每帧后向上滚 n 格（默认 0 = 不滚）。**会产生鼠标滚轮输入**，',
+    '                     只在微信位于前台时执行；这是本工具唯一模拟输入的地方，慎用',
     '  --out <目录>       导出根目录（默认 <仓库>/exports）',
   ].join('\n');
   process.stderr.write(`${msg}\n`);
@@ -74,6 +76,7 @@ function parseArgs(argv) {
     date: '',
     scale: 2,
     invert: '0',
+    scroll: 0,
     out: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -84,6 +87,7 @@ function parseArgs(argv) {
     else if (a === '--out') o.out = argv[++i];
     else if (a === '--date') o.date = argv[++i];
     else if (a === '--invert') o.invert = argv[++i];
+    else if (a === '--scroll') o.scroll = Number(argv[++i]);
     else if (a === '--interval') o.interval = Number(argv[++i]);
     else if (a === '--max-frames') o.maxFrames = Number(argv[++i]);
     else if (a === '--scale') o.scale = Number(argv[++i]);
@@ -115,26 +119,43 @@ function runPs(script, args) {
   );
 }
 
-function capture(shotPath) {
-  const stdout = runPs(CAPTURE_PS1, ['-OutPath', shotPath]);
+function capture(shotPath, scrollClicks = 0) {
+  const stdout = runPs(CAPTURE_PS1, ['-OutPath', shotPath, '-ScrollClicks', String(scrollClicks)]);
   const text = String(stdout ?? '').trim();
 
   const err = /^ERR\s+(.*)$/m.exec(text);
   if (err) {
-    const code = (/code=([A-Z_]+)/.exec(err[1])?.[1] ?? 'CAPTURE_FAILED');
+    const code = /code=([A-Z_]+)/.exec(err[1])?.[1] ?? 'CAPTURE_FAILED';
     const size = /size=(\d+x\d+)/.exec(err[1])?.[1] ?? '';
     throw Object.assign(new Error(err[1]), { code, size });
   }
+
+  // 请求了滚动但窗口不在前台：截图仍然有效，只是没滚
+  const warn = /^WARN\s+code=([A-Z_]+)/m.exec(text);
+  if (warn) {
+    const size = /size=(\d+)x(\d+)/.exec(text);
+    return {
+      width: size ? Number(size[1]) : 0,
+      height: size ? Number(size[2]) : 0,
+      foreground: false,
+      scrollSkipped: true,
+      warnCode: warn[1],
+    };
+  }
+
   if (!/^OK/m.test(text) || !existsSync(shotPath)) {
     throw Object.assign(new Error(`CAPTURE_FAILED: ${text.slice(0, 120)}`), { code: 'CAPTURE_FAILED' });
   }
 
   const size = /size=(\d+)x(\d+)/.exec(text);
   const fg = /fg=(\d)/.exec(text);
+  const scrolled = /scrolled=(\d+)/.exec(text);
   return {
     width: size ? Number(size[1]) : 0,
     height: size ? Number(size[2]) : 0,
     foreground: fg ? fg[1] === '1' : false,
+    scrollSkipped: false,
+    scrolled: scrolled ? Number(scrolled[1]) : 0,
   };
 }
 
@@ -217,12 +238,16 @@ function main() {
 
     let meta;
     try {
-      meta = capture(shot);
+      meta = capture(shot, o.scroll);
     } catch (err) {
       stats.errors += 1;
       const hint = CODE_HINT[err.code] ?? '';
       process.stdout.write(`${tag} 截屏失败 ${err.code}${hint ? ` — ${hint}` : ''}${err.size ? ` (${err.size})` : ''}\n`);
       return false;
+    }
+
+    if (meta.scrollSkipped) {
+      process.stdout.write(`${tag} ⚠ 请求了滚动但微信不在前台，本帧跳过滚动（截图仍然有效）\n`);
     }
 
     if (!meta.foreground && !coveredWarned) {
