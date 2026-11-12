@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { squeezeCjk, normalizePunct, isTimeMarker, looksLikeSender, parseOcrLines, toMessagesText, dedupe } from '../src/ocr-parse.mjs';
+import { squeezeCjk, normalizePunct, isTimeMarker, looksLikeSender, parseOcrLines, toMessagesText, dedupe, withBaseDate, mergeWrappedRows } from '../src/ocr-parse.mjs';
 
 test('去掉 OCR 在中文字之间插入的空格', () => {
   assert.equal(squeezeCjk('周 五 前 把 评 审 稿 交 上 来 ， 数 据 口 径'), '周五前把评审稿交上来，数据口径');
@@ -93,4 +93,63 @@ test('空输入不炸', () => {
   const { messages, warnings } = parseOcrLines([]);
   assert.deepEqual(messages, []);
   assert.deepEqual(warnings, []);
+});
+
+test('日期补全：只有 HH:MM 时用 --date 补成完整日期', () => {
+  assert.equal(withBaseDate('09:12', '2026-11-12'), '2026-11-12 09:12');
+  // 单位数小时会补零，保证排序/展示一致
+  assert.equal(withBaseDate('昨天9:05', '2026-11-12'), '2026-11-12 09:05');
+  // 已经带日期（哪怕是 OCR 读残的）就不动
+  assert.equal(withBaseDate('2026年1110日09:12', '2026-11-12'), '2026年1110日09:12');
+  assert.equal(withBaseDate('11月10日09:12', '2026-11-12'), '11月10日09:12');
+  // 没给基础日期就原样
+  assert.equal(withBaseDate('09:12', ''), '09:12');
+});
+
+test('气泡折行被合并成一条消息（不再拆成多条）', () => {
+  // 同一句被排成两行：x 相同、行距很小
+  const lines = [
+    { text: '小 王', x: 40, y: 70, w: 30, h: 18 },
+    { text: '周五前把评审稿交上来，', x: 40, y: 100, w: 260, h: 24 },
+    { text: '数据口径按上周定的来。', x: 40, y: 128, w: 240, h: 24 },
+  ];
+  const { messages } = parseOcrLines(lines, { pageWidth: 900 });
+  assert.equal(messages.length, 1, JSON.stringify(messages));
+  assert.equal(messages[0].text, '周五前把评审稿交上来，数据口径按上周定的来。');
+});
+
+test('行距很大的两段不合并（是两条消息）', () => {
+  const lines = [
+    { text: '第一句话在这里', x: 40, y: 100, w: 160, h: 24 },
+    { text: '第二句话在下面', x: 40, y: 200, w: 160, h: 24 },
+  ];
+  const { messages } = parseOcrLines(lines, { pageWidth: 900 });
+  assert.equal(messages.length, 2);
+});
+
+test('mergeWrappedRows 对英文补空格、对中文直接拼接', () => {
+  // 英文折行：两行都够长，不会被误判成"人名"
+  const rows = mergeWrappedRows([
+    { text: 'this is a long sentence that wraps', x: 10, y: 10, w: 300, h: 20 },
+    { text: 'onto the second line', x: 10, y: 32, w: 200, h: 20 },
+  ]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].text, 'this is a long sentence that wraps onto the second line');
+
+  const cjk = mergeWrappedRows([
+    { text: '周五前把评审稿交上来，', x: 10, y: 10, w: 160, h: 20 },
+    { text: '数据口径按上周定的来。', x: 10, y: 32, w: 160, h: 20 },
+  ]);
+  assert.equal(cjk.length, 1);
+  assert.equal(cjk[0].text, '周五前把评审稿交上来，数据口径按上周定的来。');
+});
+
+test('--date 生效时消息时间带上完整日期', () => {
+  const lines = [
+    { text: '09:12', x: 400, y: 10, w: 40, h: 16 },
+    { text: '小 王', x: 40, y: 40, w: 30, h: 18 },
+    { text: '周五前把评审稿交上来，数据口径按上周定的来。', x: 40, y: 70, w: 420, h: 24 },
+  ];
+  const { messages } = parseOcrLines(lines, { pageWidth: 900, baseDate: '2026-11-12' });
+  assert.equal(messages[0].at, '2026-11-12 09:12');
 });

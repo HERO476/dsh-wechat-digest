@@ -59,26 +59,92 @@ export function looksLikeSender(text) {
   return true;
 }
 
+/** 把 HH:MM 补成带日期的完整时间；没有基础日期就原样返回。 */
+export function withBaseDate(marker, baseDate) {
+  const t = String(marker ?? '').replace(/\s+/g, '');
+  if (!baseDate) return t;
+  const hm = /(\d{1,2}:\d{2})$/.exec(t);
+  if (!hm) return t;
+  // 已经带日期（含 年/月/日 或 - / .）就不动
+  if (/[年月日]|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}\/\d{1,2}/.test(t)) {
+    return t;
+  }
+  return `${baseDate} ${hm[1].padStart(5, '0')}`;
+}
+
+/** 中文之间的换行直接拼接；英文/数字之间补空格。 */
+function joinWrapped(left, right) {
+  if (left.length === 0) return right;
+  if (right.length === 0) return left;
+  const lastChar = left[left.length - 1];
+  const firstChar = right[0];
+  const cjkEnd = new RegExp(`[${CJK}，。！？、；：（）《》“”‘’…—]`).test(lastChar);
+  const cjkStart = new RegExp(`[${CJK}]`).test(firstChar);
+  return cjkEnd || cjkStart ? left + right : `${left} ${right}`;
+}
+
+/**
+ * 气泡里的换行会被 OCR 拆成多行：同一 x、行距很小的相邻正文行合并成一条消息。
+ * 不合并的话，一句被折行的话会变成好几条"消息"，既难读也影响摘要质量。
+ */
+export function mergeWrappedRows(rows, { xTolerance = 8, gapFactor = 0.7 } = {}) {
+  const out = [];
+  let prev = null;
+
+  for (const row of rows) {
+    const bodyLike = !looksLikeSender(row.text) || row.text.length > 12;
+
+    if (
+      prev &&
+      prev.bodyLike &&
+      bodyLike &&
+      Math.abs(row.x - prev.row.x) <= xTolerance &&
+      row.y >= prev.row.y &&
+      row.y - (prev.row.y + prev.row.h) <= Math.max(2, prev.row.h * gapFactor)
+    ) {
+      prev.row.text = joinWrapped(prev.row.text, row.text);
+      prev.row.h = row.y + row.h - prev.row.y;
+      continue;
+    }
+
+    const entry = { row, bodyLike };
+    out.push(entry);
+    prev = entry;
+  }
+
+  return out.map((entry) => entry.row);
+}
+
 /**
  * @param {Array<{text:string,x:number,y:number,w:number,h:number}>} lines
- * @param {{pageWidth?:number, selfSender?:string, defaultTime?:string}} options
+ * @param {{pageWidth?:number, selfSender?:string, defaultTime?:string, baseDate?:string, mergeWrapped?:boolean}} options
  * @returns {{messages: Array<{at:string,sender:string,text:string}>, warnings: string[]}}
  */
 export function parseOcrLines(lines, options = {}) {
-  const { pageWidth = 0, selfSender = '我', defaultTime = '未知时间' } = options;
+  const {
+    pageWidth = 0,
+    selfSender = '我',
+    defaultTime = '未知时间',
+    baseDate = '',
+    mergeWrapped = true,
+  } = options;
   const warnings = [];
   const messages = [];
 
-  const rows = (Array.isArray(lines) ? lines : [])
+  const normalized = (Array.isArray(lines) ? lines : [])
     .filter((line) => line && typeof line.text === 'string')
     .map((line) => ({
       text: normalizePunct(squeezeCjk(line.text)),
       x: Number(line.x ?? 0),
       y: Number(line.y ?? 0),
+      w: Number(line.w ?? 0),
       h: Number(line.h ?? 0),
     }))
     .filter((line) => line.text.length > 0)
     .sort((a, b) => (a.y === b.y ? a.x - b.x : a.y - b.y));
+
+  // 先做换行合并，再做角色判定：否则折行会把一句话拆成几条"消息"
+  const rows = mergeWrapped ? mergeWrappedRows(normalized) : normalized;
 
   let currentTime = defaultTime;
   let pendingSender = null;
@@ -90,7 +156,8 @@ export function parseOcrLines(lines, options = {}) {
     if (isTimeMarker(row.text)) {
       // 时间标记只保留"压缩后"的形态：OCR 常把 "2026年11月10日 09:12" 读成
       // "2026 年 1 1 10 日 09:12"，去掉空格至少不再散架。
-      currentTime = row.text.replace(/\s+/g, '');
+      // 给了 baseDate 时补成完整日期（OCR 常把日期读残）。
+      currentTime = withBaseDate(row.text, baseDate);
       pendingSender = null;
       continue;
     }

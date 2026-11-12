@@ -220,10 +220,21 @@ npm run import:ocr -- 截图.png --room 产品评审群 --append
 ```bash
 npm run watch:wechat -- --room 产品评审群 --interval 20
 # 只采一屏：        -- --room 产品评审群 --once
+# 补全日期：        -- --room 产品评审群 --date 2026-11-12
+# 采 30 屏就停：    -- --room 产品评审群 --max-frames 30
 ```
 
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--interval` | 20 | 采集间隔秒数（最小 5）；画面未变化时自动跳过 OCR |
+| `--max-frames` | 不限 | 采满 N 帧后自动结束并打印汇总 |
+| `--date` | 空 | 当前日期；OCR 常把日期读残，用它把 `09:12` 补成 `2026-11-12 09:12` |
+| `--scale` | 2 | OCR 前放大倍数。实测 2× 比 1× 多认出一整行、并修正「口径/预算」这类词 |
+| `--kind` | group | `group` / `private` |
+| `--out` | `<仓库>/exports` | 导出根目录 |
+
 它会循环：定位微信主窗口 → **屏幕像素拷贝**（`CopyFromScreen`，不是 PrintWindow：
-微信 4.x 的 PrintWindow 返回空白帧）→ OCR → 解析 → 去重追加到 `exports/`。
+微信 4.x 的 PrintWindow 返回空白帧）→ 2× 放大 + Windows OCR → 解析 → 去重追加到 `exports/`。
 
 三个前提（缺一不可）：
 
