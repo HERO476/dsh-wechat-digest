@@ -73,6 +73,7 @@
     "check": "node scripts/check-core-purity.mjs",
     "verify": "node scripts/check-core-purity.mjs && node scripts/run-tests.mjs",
     "settings": "node scripts/settings-server.mjs",
-    "import:ocr": "node scripts/import-screenshot.mjs"
+    "import:ocr": "node scripts/import-screenshot.mjs",
+    "watch:wechat": "node scripts/watch-wechat.mjs"
   }
 }

@@ -215,6 +215,24 @@ npm run import:ocr -- 截图.png --room 产品评审群 --append
 
 它**不读进程内存、不碰微信数据库、不联网、不模拟输入**，所以对账号没有新增风险。
 
+### 全自动模式（自己找窗口、自己截）
+
+```bash
+npm run watch:wechat -- --room 产品评审群 --interval 20
+# 只采一屏：        -- --room 产品评审群 --once
+```
+
+它会循环：定位微信主窗口 → **屏幕像素拷贝**（`CopyFromScreen`，不是 PrintWindow：
+微信 4.x 的 PrintWindow 返回空白帧）→ OCR → 解析 → 去重追加到 `exports/`。
+
+三个前提（缺一不可）：
+
+1. 微信电脑端**已登录**并打开你要采集的那个群聊；
+2. 窗口**可见且不被其它窗口遮挡**（拷贝的是屏幕上真实像素，被挡住就会把别的窗口截进来）；
+3. **不自动滚动**：要看更早的消息，你自己在微信里往上滚，下一轮采集会把新露出的内容按内容去重追加。
+
+> 它仍然只是"截屏 + OCR"：不读内存、不解密、不注入、不模拟按键。对账号的风险等级和手动截图一样。
+
 摘要会写入 `~/.dsh/wechat-digest/digests.jsonl`（可用 `WECHAT_DIGEST_DATA_DIR` 改），
 **只存白名单字段**：`roomHandle` / `digest` / `provenance` / `trigger` / `createdAt`。
 
